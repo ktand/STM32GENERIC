@@ -823,5 +823,45 @@ BORG_F765.menu.serial.SerialUSB.build.extra_flags_serial=-DMENU_SERIAL=SerialUSB
 BORG_F765.menu.serial.SerialUART1=SerialUART1
 BORG_F765.menu.serial.SerialUART1.build.extra_flags_serial=-DMENU_SERIAL=SerialUART1
 
+################################################################################
+# ARMED board
+
+ARMED.name=ArmEd
+
+ARMED.upload.maximum_size=524288
+ARMED.upload.maximum_data_size=131072
+
+ARMED.build.mcu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard
+ARMED.build.core=arduino
+ARMED.build.board=ARMED
+ARMED.build.variant=ARMED
+ARMED.build.series=STM32F4
+ARMED.build.f_cpu=168000000L
+ARMED.build.extra_flags=-DSTM32F407VE -DHSE_VALUE=8000000
+
+ARMED.upload.tool=stlink_upload
+ARMED.upload.protocol=STLink
+
+ARMED.menu.upload_method.STLinkMethod=STLink [Automatic serial = SerialUSB]
+ARMED.menu.upload_method.STLinkMethod.upload.protocol=STLink
+ARMED.menu.upload_method.STLinkMethod.upload.tool=stlink_upload
+ARMED.menu.upload_method.STLinkMethod.build.extra_flags_serial_auto=-DMENU_SERIAL_AUTO=SerialUSB
+
+ARMED.menu.upload_method.serialMethod=Serial UART1 [TX/PA9, RX/PA10, BOOT0=1, BOOT1=0]
+ARMED.menu.upload_method.serialMethod.upload.protocol=maple_serial
+ARMED.menu.upload_method.serialMethod.upload.tool=serial_upload
+ARMED.menu.upload_method.serialMethod.build.extra_flags_serial_auto=-DMENU_SERIAL_AUTO=SerialUART1
+
+ARMED.menu.usb.SerialUSB=Serial [Virtual COM port, PA11/PA12 pins]
+ARMED.menu.usb.SerialUSB.build.extra_flags_usb=-DMENU_USB_SERIAL
+ARMED.menu.usb.SerialMSC=Mass storage [testing, see documentation]
+ARMED.menu.usb.SerialMSC.build.extra_flags_usb=-DMENU_USB_MASS_STORAGE
+ARMED.menu.usb.Disabled=Disabled, no USB
+
+ARMED.menu.serial.Automatic=Automatically selected based on upload method
+ARMED.menu.serial.SerialUSB=SerialUSB
+ARMED.menu.serial.SerialUSB.build.extra_flags_serial=-DMENU_SERIAL=SerialUSB
+ARMED.menu.serial.SerialUART1=SerialUART1
+ARMED.menu.serial.SerialUART1.build.extra_flags_serial=-DMENU_SERIAL=SerialUART1
 
 ################################################################################
