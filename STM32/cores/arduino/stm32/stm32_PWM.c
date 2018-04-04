@@ -28,8 +28,7 @@ static uint32_t counter;
 static uint32_t waitCycles;
 static uint8_t analogWriteResolutionBits = 8;
 
-const uint32_t TIMER_MAX_CYCLES = UINT16_MAX;
-
+const uint32_t TIMER_MAX_CYCLES = 84000;
 const uint32_t PWM_FREQUENCY_HZ = 1000;
 
 extern void pinMode(uint8_t, uint8_t);
@@ -90,6 +89,8 @@ static void initTimer() {
         handle->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
         HAL_TIM_Base_Init(handle);
 
+        handle->Instance->CR1 |= TIM_CR1_ARPE; // Enable ARR preload
+        
         HAL_TIM_Base_Start_IT(handle);
     }
 }
