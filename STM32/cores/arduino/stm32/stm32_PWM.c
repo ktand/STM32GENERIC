@@ -22,209 +22,251 @@
 
 #include "stm32_gpio.h"
 
+typedef struct
+{
+    GPIO_TypeDef *port;
+    uint32_t pin_mask;
+
+    uint32_t dutyCycle;
+    int32_t counterCycles;
+} PWM_PIN_CONFIG;
+
+#define PWM_PIN_COUNT sizeof(variant_pin_list) / sizeof(variant_pin_list[0])
+
+static PWM_PIN_CONFIG pwmConfigTable[3][PWM_PIN_COUNT];
+
+PWM_PIN_CONFIG *pCurrentPwmPin;
+
+PWM_PIN_CONFIG *pActiveTable = &pwmConfigTable[0];
+PWM_PIN_CONFIG *pInactiveTable = &pwmConfigTable[1];
+PWM_PIN_CONFIG *pWorkTable = &pwmConfigTable[2];
+
+uint8_t pwmUpdateTable = 0;
+
 TIM_HandleTypeDef *handle;
 
-static uint32_t counter;
-static uint32_t waitCycles;
 static uint8_t analogWriteResolutionBits = 8;
 
-const uint32_t TIMER_MAX_CYCLES = UINT16_MAX;
-
+const uint32_t TIMER_MAX_CYCLES = 84000;
 const uint32_t PWM_FREQUENCY_HZ = 1000;
+const uint32_t TIMER_PERIOD = 84000;
 
 extern void pinMode(uint8_t, uint8_t);
 
-#define min(a,b) ((a)<(b)?(a):(b))
+#define min(a, b) ((a) < (b) ? (a) : (b))
 
 stm32_pwm_disable_callback_func stm32_pwm_disable_callback = NULL;
 
-void (*pwm_callback_func)();
+void (*pwmCallbackFunc)();
 
-void pwm_callback();
-
-typedef struct {
-    GPIO_TypeDef *port;
-    void (*callback)();
-    uint32_t pin_mask;
-    uint32_t waveLengthCycles;
-    uint32_t dutyCycle;
-    int32_t counterCycles;
-} stm32_pwm_type;
-
-static stm32_pwm_type pwm_config[sizeof(variant_pin_list) / sizeof(variant_pin_list[0])];
+void pwmCallback();
 
 void stm32_pwm_disable(GPIO_TypeDef *port, uint32_t pin);
 
-void analogWriteResolution(int bits) {
+void analogWriteResolution(int bits)
+{
     analogWriteResolutionBits = bits;
 }
 
-static void initTimer() {
+static void initTimer()
+{
     static TIM_HandleTypeDef staticHandle;
 
-    if (handle == NULL) {
+    if (handle == NULL)
+    {
         handle = &staticHandle;
-        pwm_callback_func = &pwm_callback;
+        pwmCallbackFunc = &pwmCallback;
 
         stm32_pwm_disable_callback = &stm32_pwm_disable;
 
+#ifdef TIM2 //99% of chips have TIM2
+        __HAL_RCC_TIM2_CLK_ENABLE();
+        HAL_NVIC_SetPriority(TIM2_IRQn, 0, 0);
+        HAL_NVIC_EnableIRQ(TIM2_IRQn);
 
-        #ifdef TIM2 //99% of chips have TIM2
-            __HAL_RCC_TIM2_CLK_ENABLE();
-            HAL_NVIC_SetPriority(TIM2_IRQn, 0, 0);
-            HAL_NVIC_EnableIRQ(TIM2_IRQn);
+        handle->Instance = TIM2;
+#else
+        __HAL_RCC_TIM3_CLK_ENABLE();
+        HAL_NVIC_SetPriority(TIM3_IRQn, 0, 0);
+        HAL_NVIC_EnableIRQ(TIM3_IRQn);
 
-            handle->Instance = TIM2;
-        #else
-            __HAL_RCC_TIM3_CLK_ENABLE();
-            HAL_NVIC_SetPriority(TIM3_IRQn, 0, 0);
-            HAL_NVIC_EnableIRQ(TIM3_IRQn);
-
-            handle->Instance = TIM3;
-        #endif
+        handle->Instance = TIM3;
+#endif
 
         handle->Init.Prescaler = 0;
         handle->Init.CounterMode = TIM_COUNTERMODE_UP;
-        waitCycles = TIMER_MAX_CYCLES;
-        handle->Init.Period = waitCycles;
+        handle->Init.Period = TIMER_PERIOD;
         handle->Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+
         HAL_TIM_Base_Init(handle);
 
+        TIM_OC_InitTypeDef sConfigOC;
+        sConfigOC.OCMode = TIM_OCMODE_TIMING;
+        sConfigOC.Pulse = TIMER_PERIOD + 1;
+        sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+        sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+
+        HAL_TIM_OC_ConfigChannel(handle, &sConfigOC, TIM_CHANNEL_1);
+
         HAL_TIM_Base_Start_IT(handle);
+        HAL_TIM_OC_Start_IT(handle, TIM_CHANNEL_1);
     }
 }
 
-void pwmWrite(uint8_t pin, int dutyCycle, int frequency, int durationMillis) {
+int pwmCompareFunction(const void *p1, const void *p2)
+{
+    PWM_PIN_CONFIG *l = (PWM_PIN_CONFIG *)p1;
+    PWM_PIN_CONFIG *r = (PWM_PIN_CONFIG *)p2;
+
+    if (l->port == NULL && r->port == NULL)
+        return 0;
+    else if (l->port == NULL && r->port != NULL)
+        return 1;
+    else if (l->port != NULL && r->port == NULL)
+        return -1;
+
+    return l->dutyCycle - r->dutyCycle;
+}
+
+void pwmApplyWorkTable(void)
+{
+    qsort(pWorkTable, PWM_PIN_COUNT, sizeof(PWM_PIN_CONFIG), pwmCompareFunction);
+
+    memcpy(pInactiveTable, pWorkTable, sizeof(PWM_PIN_CONFIG) * PWM_PIN_COUNT);
+
+    pwmUpdateTable = 1;
+}
+
+void pwmWrite(uint8_t pin, int dutyCycle, int frequency, int durationMillis)
+{
     initTimer();
 
-    for(size_t i=0; i<sizeof(pwm_config) / sizeof(pwm_config[0]); i++) {
-        if (pwm_config[i].port == NULL ||
-                (pwm_config[i].port == variant_pin_list[pin].port
-                && pwm_config[i].pin_mask == variant_pin_list[pin].pin_mask)) {
-
-            if (pwm_config[i].port == NULL) {
+    for (size_t i = 0; i < PWM_PIN_COUNT; i++)
+    {
+        if (pWorkTable[i].port == NULL || (pWorkTable[i].port == variant_pin_list[pin].port && pWorkTable[i].pin_mask == variant_pin_list[pin].pin_mask))
+        {
+            if (pWorkTable[i].port == NULL)
+            {
                 pinMode(pin, OUTPUT);
             }
 
-            #ifdef STM32F0 // TODO better condition for when there is no pclk2
+            if (dutyCycle == 0 || dutyCycle >= 65280)
+            {
+                pWorkTable[i].port = NULL;
+                pWorkTable[i].pin_mask = 0;
+                pWorkTable[i].dutyCycle = 0;
+                pWorkTable[i].counterCycles = 0;
+
+                digitalWrite(pin, dutyCycle == 0 ? 0 : 1);
+            }
+            else
+            {
+#ifdef STM32F0 // TODO better condition for when there is no pclk2
                 uint32_t timerFreq = HAL_RCC_GetPCLK1Freq();
-            #else
+#else
                 uint32_t timerFreq = HAL_RCC_GetPCLK2Freq();
-            #endif
+#endif
+                uint32_t waveLengthCycles = timerFreq / frequency;
 
-            pwm_config[i].port = variant_pin_list[pin].port;
-            pwm_config[i].pin_mask = variant_pin_list[pin].pin_mask;
-            pwm_config[i].waveLengthCycles = timerFreq / frequency;
-            pwm_config[i].dutyCycle = (uint64_t)pwm_config[i].waveLengthCycles * dutyCycle >> 16;
+                pWorkTable[i].port = variant_pin_list[pin].port;
+                pWorkTable[i].pin_mask = variant_pin_list[pin].pin_mask;
+                pWorkTable[i].dutyCycle = (uint64_t)waveLengthCycles * dutyCycle >> 16;
 
-            if (durationMillis > 0) {
-                pwm_config[i].counterCycles = timerFreq / 1000 * durationMillis;
+                if (durationMillis > 0)
+                {
+                    pWorkTable[i].counterCycles = timerFreq / 1000 * durationMillis;
+                }
             }
 
+            pwmApplyWorkTable();
             break;
         }
     }
 }
 
-extern void tone(uint8_t pin, unsigned int frequency, unsigned long durationMillis) {
+extern void tone(uint8_t pin, unsigned int frequency, unsigned long durationMillis)
+{
     pwmWrite(pin, 1 << 15, frequency, durationMillis);
 }
 
-void analogWrite(uint8_t pin, int value) {
+void analogWrite(uint8_t pin, int value)
+{
     pwmWrite(pin, ((uint32_t)value << 16) >> analogWriteResolutionBits, PWM_FREQUENCY_HZ, 0);
 }
 
-void stm32ScheduleMicros(uint32_t microseconds, void (*callback)()) {
-    initTimer();
+void stm32_pwm_disable(GPIO_TypeDef *port, uint32_t pin_mask)
+{
+    for (size_t i = 0; i < PWM_PIN_COUNT && pWorkTable[i].port != NULL; i++)
+    {
+        if (pWorkTable[i].port == port && pWorkTable[i].pin_mask == pin_mask)
+        {
+            pWorkTable[i].port = NULL;
+            pWorkTable[i].pin_mask = 0;
+            pWorkTable[i].dutyCycle = 0;
+            pWorkTable[i].counterCycles = 0;
 
-    for(size_t i=0; i<sizeof(pwm_config) / sizeof(pwm_config[0]); i++) {
-        if (pwm_config[i].port == NULL && pwm_config[i].callback == NULL) {
-
-            pwm_config[i].callback = callback;
-
-            pwm_config[i].waveLengthCycles = HAL_RCC_GetPCLK2Freq() * (uint64_t)microseconds / 1000000;
-            pwm_config[i].counterCycles = pwm_config[i].waveLengthCycles;
-            break;
-        }
-    }
-}
-
-void stm32_pwm_disable(GPIO_TypeDef *port, uint32_t pin_mask) {
-    for(size_t i=0; i<sizeof(pwm_config) / sizeof(pwm_config[0]); i++) {
-        if (pwm_config[i].port == NULL) {
-            return;
-        }
-
-        if (pwm_config[i].port == port && pwm_config[i].pin_mask == pin_mask) {
-
-            for(size_t j = i + 1; j < sizeof(pwm_config) / sizeof(pwm_config[0]); j++) {
-                if (pwm_config[j].port == NULL) {
-                    pwm_config[i].port = pwm_config[j - 1].port;
-                    pwm_config[i].pin_mask = pwm_config[j - 1].pin_mask;
-
-                    pwm_config[j - 1].port = NULL;
-                    break;
-                }
-            }
+            pwmApplyWorkTable();
 
             break;
         }
     }
 }
 
-void pwm_callback() {
-    if(__HAL_TIM_GET_FLAG(handle, TIM_FLAG_UPDATE) != RESET) {
-        if(__HAL_TIM_GET_IT_SOURCE(handle, TIM_IT_UPDATE) !=RESET) {
+void pwmCallback()
+{
+    if (__HAL_TIM_GET_FLAG(handle, TIM_FLAG_UPDATE) != RESET)
+    {
+        if (__HAL_TIM_GET_IT_SOURCE(handle, TIM_IT_UPDATE) != RESET)
+        {
             __HAL_TIM_CLEAR_IT(handle, TIM_IT_UPDATE);
 
-            counter += waitCycles;
-            uint32_t nextWaitCycles = TIMER_MAX_CYCLES;
+            if (pwmUpdateTable)
+            {
+                pCurrentPwmPin = pInactiveTable;
+                pInactiveTable = pActiveTable;
+                pActiveTable = pCurrentPwmPin;
+                pwmUpdateTable = 0;
+            }
+            else
+                pCurrentPwmPin = pActiveTable;
 
-            for(size_t i=0; i<sizeof(pwm_config); i++) {
-                if (pwm_config[i].port != NULL) {
-                    if (pwm_config[i].dutyCycle > counter % pwm_config[i].waveLengthCycles) {
-                        pwm_config[i].port->BSRR = pwm_config[i].pin_mask;
-                        nextWaitCycles = min(nextWaitCycles, pwm_config[i].dutyCycle - (counter % pwm_config[i].waveLengthCycles));
-                    } else {
-                        pwm_config[i].port->BSRR = pwm_config[i].pin_mask << 16;
-                        nextWaitCycles = min(nextWaitCycles, pwm_config[i].waveLengthCycles - counter % pwm_config[i].waveLengthCycles);
-                    }
+            // Set all configured pins to HIGH
+            for (PWM_PIN_CONFIG *pinPtr = pCurrentPwmPin; pinPtr->port != NULL; pinPtr++)
+                pinPtr->port->BSRR = pinPtr->pin_mask;
 
-                    if (pwm_config[i].counterCycles > 0) {
-                        if (pwm_config[i].counterCycles <= (int)waitCycles) {
-                            stm32_pwm_disable(pwm_config[i].port, pwm_config[i].pin_mask);
-                        } else {
-                            pwm_config[i].counterCycles -= waitCycles;
-                        }
-                    }
-                } else if (pwm_config[i].callback != NULL) {
-                    pwm_config[i].counterCycles -= waitCycles;
-                    if (pwm_config[i].counterCycles < 0) {
-                        pwm_config[i].callback();
-                        pwm_config[i].counterCycles += pwm_config[i].waveLengthCycles;
-                    }
-                } else {
-                    break;
-                }
+            if (pCurrentPwmPin->port != NULL)
+                handle->Instance->CCR1 = pCurrentPwmPin->dutyCycle; // Capture compare interrupt will be called at pCurrentPwmPin->dutyCycle cycles
+            else
+                handle->Instance->CCR1 = handle->Instance->ARR + 1; // Capture compare interrupt will not be called
+        }
+    }
+    else if (__HAL_TIM_GET_FLAG(handle, TIM_FLAG_CC1) != RESET)
+    {
+        if (__HAL_TIM_GET_IT_SOURCE(handle, TIM_IT_CC1) != RESET)
+        {
+            __HAL_TIM_CLEAR_IT(handle, TIM_IT_CC1);
+
+            while (pCurrentPwmPin->port != NULL && pCurrentPwmPin->dutyCycle <= handle->Instance->CNT)
+            {
+                // Set pins that have count <= Timer->CNT as LOW
+                pCurrentPwmPin->port->BSRR = pCurrentPwmPin->pin_mask << 16;
+                pCurrentPwmPin++;
             }
 
-            if (!nextWaitCycles || nextWaitCycles > TIMER_MAX_CYCLES) {
-                nextWaitCycles = TIMER_MAX_CYCLES;
-            }
-            waitCycles = nextWaitCycles;
-
-            __HAL_TIM_SET_AUTORELOAD(handle, waitCycles);
+            if (pCurrentPwmPin->port != NULL)
+                handle->Instance->CCR1 = pCurrentPwmPin->dutyCycle;
         }
     }
 }
 
 #ifdef TIM2
-  extern void TIM2_IRQHandler(void) {
+extern void TIM2_IRQHandler(void)
+{
 #else
-  extern void TIM3_IRQHandler(void) {
+extern void TIM3_IRQHandler(void)
+{
 #endif
 
-    if (pwm_callback_func != NULL) {
-        (*pwm_callback_func)();
-    }
+    if (pwmCallbackFunc != NULL)
+        (*pwmCallbackFunc)();
 }
