@@ -47,8 +47,19 @@ stm32_exti_callback_func callbacks[16];
 void attachInterrupt(uint8_t pin, stm32_exti_callback_func callback, int mode) {
     const stm32_port_pin_type port_pin = variant_pin_list[pin];
 
-    uint8_t irq = __builtin_ffs(port_pin.pin_mask) - 1;
-    callbacks[irq] = callback;
+    uint8_t id = __builtin_ffs(port_pin.pin_mask) - 1;
+
+#ifdef STM32F1xx
+    uint8_t position;
+    uint32_t CRxRegOffset = 0;
+    uint32_t ODRRegOffset = 0;
+    volatile uint32_t *CRxRegister;
+    const uint32_t ConfigMask = 0x00000008; //MODE0 == 0x0 && CNF0 == 0x2
+#else
+    uint32_t pull;
+#endif /* STM32F1xx */
+
+    callbacks[id] = callback;
 
     stm32GpioClockEnable(port_pin.port);
 
@@ -65,15 +76,47 @@ void attachInterrupt(uint8_t pin, stm32_exti_callback_func callback, int mode) {
             break;
 
         case CHANGE:
-            default:
+        default:
             GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
     }
 
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    // Read the pull mode directly in the register as no function exists to get it.
+    // Do it in case the user already defines the IO through the digital io interface
+
+#ifndef STM32F1xx
+      pull = port_pin.port->PUPDR;
+#ifdef GPIO_PUPDR_PUPD0
+      pull &=(GPIO_PUPDR_PUPD0<<(id*2));
+      GPIO_InitStruct.Pull = (GPIO_PUPDR_PUPD0 & (pull>>(id*2)));
+#else
+      pull &=(GPIO_PUPDR_PUPDR0<<(id*2));
+      GPIO_InitStruct.Pull = (GPIO_PUPDR_PUPDR0 & (pull>>(id*2)));
+#endif /* GPIO_PUPDR_PUPD0 */
+#else
+      CRxRegister = (pin < GPIO_PIN_8) ? &port->CRL : &port->CRH;
+
+      for (position = 0; position < 16; position++) {
+        if(pin == (0x0001 << position)) {
+          CRxRegOffset = (pin < GPIO_PIN_8) ? (position << 2) : ((position - 8) << 2);
+          ODRRegOffset = position;
+        }
+      }
+
+      if((*CRxRegister & ((GPIO_CRL_MODE0 | GPIO_CRL_CNF0) << CRxRegOffset)) == (ConfigMask << CRxRegOffset)) {
+        if((port->ODR & (GPIO_ODR_ODR0 << ODRRegOffset)) == (GPIO_ODR_ODR0 << ODRRegOffset)) {
+          GPIO_InitStruct.Pull = GPIO_PULLUP;
+        } else {
+          GPIO_InitStruct.Pull = GPIO_PULLDOWN;
+        }
+      } else {
+        GPIO_InitStruct.Pull = GPIO_NOPULL;
+      }
+#endif /* STM32F1xx */
+
     HAL_GPIO_Init(port_pin.port, &GPIO_InitStruct);
 
-    HAL_NVIC_SetPriority(exti_irq[irq], 6, 0);
-    HAL_NVIC_EnableIRQ(exti_irq[irq]);
+    HAL_NVIC_SetPriority(exti_irq[id], 6, 0);
+    HAL_NVIC_EnableIRQ(exti_irq[id]);
 }
 
 void detachInterrupt(uint8_t pin) {
